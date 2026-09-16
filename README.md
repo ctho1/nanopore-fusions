@@ -4,8 +4,8 @@ Detect gene fusions from Oxford Nanopore cDNA reads on the PALMA-II cluster
 (UKM Münster). Each sample is analysed by two independent callers in separate
 SLURM jobs:
 
-- 🔎 **FusionSeeker** — Dorado/minimap2 splice alignment against hg38, followed
-  by FusionSeeker.
+- 🔎 **FusionSeeker** — Dorado's embedded minimap2 splice alignment against
+  hg38, followed by FusionSeeker and reference-based breakpoint polishing.
 - 🧪 **JAFFAL** — the JAFFA long-read pipeline in an Apptainer container, using
   hg38 and GENCODE 49.
 
@@ -49,7 +49,8 @@ The paths near the top of the job scripts must match the cluster installation:
 - FusionSeeker and `bsalign` available through `PATH`
 - A JAFFA Apptainer image and the prepared hg38/GENCODE 49 reference
 - PALMA modules:
-  - `palma/2022a GCC/11.3.0 SAMtools/1.16.1` for FusionSeeker
+  - `palma/2022a GCC/11.3.0 SAMtools/1.16.1` for BAM processing
+  - `palma/2024a GCCcore/13.3.0 minimap2/2.29` for FusionSeeker breakpoint polishing
   - `palma/2024a Apptainer` for JAFFAL
 - SLURM commands such as `sbatch` and `squeue`
 
@@ -112,6 +113,10 @@ The workflow is restart-friendly:
   result file, then writes a completion marker.
 - JAFFAL writes a completion marker only after `jaffa_results.csv` has been
   verified.
+
+The primary alignment is performed by Dorado. FusionSeeker receives `--ref` and
+uses the separately loaded minimap2 2.29 module only for its additional
+reference-based breakpoint-polishing step.
 
 After a timeout or failure, run `./submit_fusions.sh` again for the affected
 sample. Incomplete stages are resumed or rebuilt.

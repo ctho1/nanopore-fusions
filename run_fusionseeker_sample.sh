@@ -9,7 +9,7 @@
 #SBATCH --output=./log/%x_%j.out.txt
 #SBATCH --error=./log/%x_%j.err.txt
 
-# Dorado aligner (minimap2 -x splice) + FusionSeeker for ONE sample.
+# Dorado aligner (embedded minimap2 -x splice) + FusionSeeker for ONE sample.
 # Usage (normally via submit_fusions.sh):
 #   sbatch run_fusionseeker_sample.sh <sample> <fastq_abs> <out_dir_abs>
 #
@@ -76,11 +76,13 @@ trap cleanup EXIT
 command -v module >/dev/null || { echo "ERROR: environment modules are not available" >&2; exit 1; }
 module purge
 module load palma/2022a GCC/11.3.0 SAMtools/1.16.1
+module load palma/2024a GCCcore/13.3.0 minimap2/2.29
 
 [[ -r "$REFERENCE" ]]  || { echo "ERROR: reference not readable: $REFERENCE" >&2; exit 1; }
 [[ -x "$DORADO" ]]     || { echo "ERROR: Dorado not executable: $DORADO" >&2; exit 1; }
 [[ -r "$FASTQ" ]]      || { echo "ERROR: fastq not readable: $FASTQ" >&2; exit 1; }
 command -v samtools     >/dev/null || { echo "ERROR: samtools not found" >&2; exit 1; }
+command -v minimap2     >/dev/null || { echo "ERROR: minimap2 not found" >&2; exit 1; }
 command -v fusionseeker >/dev/null || { echo "ERROR: fusionseeker not found" >&2; exit 1; }
 mkdir -p "$ALIGN_DIR" "$TMP_DIR"
 
@@ -97,6 +99,7 @@ echo "  out_dir: $OUT_DIR"
 echo "  tmp:     $TMP_DIR"
 "$DORADO" --version
 samtools --version | head -n 1
+echo "minimap2 $(minimap2 --version)"
 
 ## 1. Alignment: dorado aligner | samtools sort (no unsorted BAM on disk) ###############
 if [[ -s "$SORTED_BAM" ]] \
@@ -144,8 +147,11 @@ mv -- "${READ_COUNT_FILE}.tmp" "$READ_COUNT_FILE"
 echo "[$(date)] $SAMPLE: total reads = $total_reads, mapped = $mapped_reads"
 
 ## 3. FusionSeeker ######################################################################
+# The BAM is aligned by Dorado. FusionSeeker uses the reference and the external
+# minimap2 module only for its additional breakpoint-polishing step.
 BAM_STAT="$(stat -c '%s:%Y' "$SORTED_BAM")"
-FUSION_SIGNATURE="$ALIGN_SIGNATURE|bam=$SORTED_BAM:$BAM_STAT|datatype=nanopore"
+MINIMAP2_VERSION="$(minimap2 --version)"
+FUSION_SIGNATURE="$ALIGN_SIGNATURE|bam=$SORTED_BAM:$BAM_STAT|datatype=nanopore|breakpoint_polish=minimap2-$MINIMAP2_VERSION"
 if [[ -s "$FUSION_OUT/confident_genefusion.txt" \
         && -f "$FUSION_DONE" \
         && -r "$FUSION_STATE" \
