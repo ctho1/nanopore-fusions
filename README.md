@@ -1,50 +1,135 @@
-# nanopore-fusions
+# 🧬 Nanopore Fusion Detection
 
-Gene fusion detection from Nanopore cDNA reads on the PALMA-II cluster (UKM Münster).
-Two independent callers per sample, each running as its own SLURM job:
+Detect gene fusions from Oxford Nanopore cDNA reads on the PALMA-II cluster
+(UKM Münster). Each sample is analysed by two independent callers in separate
+SLURM jobs:
 
-- **FusionSeeker**: Dorado aligner (minimap2 `-x splice`, hg38) piped into `samtools sort`, then FusionSeeker.
-- **JAFFAL**: JAFFA long-read pipeline via Apptainer (own alignment inside the container, hg38 / GENCODE 49).
+- 🔎 **FusionSeeker** — Dorado/minimap2 splice alignment against hg38, followed
+  by FusionSeeker.
+- 🧪 **JAFFAL** — the JAFFA long-read pipeline in an Apptainer container, using
+  hg38 and GENCODE 49.
 
-No read trimming or splitting: both tools start from the concatenated raw FASTQ per sample.
+Both workflows start from the concatenated, untrimmed FASTQ. They use separate
+output trees and only share the read-only input file.
 
-## Layout
+## 🔄 Workflow
 
+```text
+fastq/<sample>/*.fastq.gz
+            │
+            ▼
+fastq_concat/<sample>.fastq.gz
+            │
+       ┌────┴───────────┐
+       ▼                ▼
+  JAFFAL job      FusionSeeker job
+       │                │
+       ▼                ▼
+jaffa_results.csv  confident_genefusion.txt
 ```
-fastq/<sample>/*.fastq.gz          input chunks, one subfolder per sample
-fastq_concat/<sample>.fastq.gz     concatenated input (created by submit_fusions.sh)
-results_jaffal/<sample>/           JAFFAL only: bpipe work dir, tmp/, jaffa_results.csv
-results_fusionseeker/<sample>/     FusionSeeker only: alignment/, tmp/, fusionseeker_out/
+
+## 📁 Repository layout
+
+```text
+fastq/<sample>/*.fastq.gz          Input chunks, one directory per sample
+fastq_concat/<sample>.fastq.gz     Concatenated input created by the driver
+results_jaffal/<sample>/           JAFFAL work directory and results
+results_fusionseeker/<sample>/     Alignment and FusionSeeker results
 log/                               SLURM stdout/stderr per sample and tool
 ```
 
-The two tools never write to the same directory tree; the only shared file is the read-only concatenated FASTQ.
+Generated FASTQs, logs, and result files are ignored by Git; the directory
+structure is retained through `.gitkeep` files.
 
-## Usage
+## ✅ Prerequisites
+
+The paths near the top of the job scripts must match the cluster installation:
+
+- Dorado 1.1.1 and an hg38 reference FASTA
+- FusionSeeker and `bsalign` available through `PATH`
+- A JAFFA Apptainer image and the prepared hg38/GENCODE 49 reference
+- PALMA modules:
+  - `palma/2022a GCC/11.3.0 SAMtools/1.16.1` for FusionSeeker
+  - `palma/2024a Apptainer` for JAFFAL
+- SLURM commands such as `sbatch` and `squeue`
+
+## 🖥️ SLURM resources
+
+| Caller | CPUs | Memory | Time limit | Partition |
+| --- | ---: | ---: | ---: | --- |
+| JAFFAL | 16 | 32 GB | 6 hours | `normal,requeue` |
+| FusionSeeker | 36 | 80 GB | 6 hours | `normal,requeue` |
+
+## 🚀 Quick start
+
+1. Place each sample's gzipped FASTQ chunks in its own directory:
+
+   ```text
+   fastq/
+   ├── S1/
+   │   ├── chunk_01.fastq.gz
+   │   └── chunk_02.fastq.gz
+   └── S2/
+       └── reads.fastq.gz
+   ```
+
+2. Submit all samples or select specific sample IDs:
+
+   ```bash
+   ./submit_fusions.sh
+   ./submit_fusions.sh S1 S2
+   ```
+
+3. Inspect the queue and logs:
+
+   ```bash
+   squeue -u "$USER"
+   tail -f log/S1.jaffal.*.out.txt
+   ```
+
+Sample IDs may contain letters, numbers, dots, underscores, and hyphens.
+
+### 🧭 Preview without submitting
+
+The dry run prepares concatenated input files and prints the `sbatch` commands,
+but does not require SLURM and does not submit jobs:
 
 ```bash
-cd $(readlink -f .)          # apptainer bind mounts fail under symlinked paths
-./submit_fusions.sh          # all samples under fastq/
-./submit_fusions.sh S1 S2    # selected samples
-DRY_RUN=1 ./submit_fusions.sh   # concatenate only, print sbatch commands
+DRY_RUN=1 ./submit_fusions.sh
 ```
 
-`submit_fusions.sh` concatenates the chunks of each sample and submits
-`run_jaffal_sample.sh` (16 CPUs, 32 GB) and `run_fusionseeker_sample.sh` (36 CPUs, 80 GB),
-both with `--time=6:00:00` and `--partition=normal,requeue`.
+## ♻️ Safe reruns
 
-Both job scripts are idempotent: finished stages are skipped, so a rerun of
-`submit_fusions.sh` after a time-out only restarts what is missing.
+The workflow is restart-friendly:
 
-## Prerequisites (paths configured at the top of each job script)
+- Concatenated FASTQs are rebuilt when the chunk list, file size, or modification
+  time changes.
+- BAM and caller results are reused only when their recorded FASTQ/reference
+  signature still matches; changed inputs trigger the affected stages again.
+- A missing BAM index is recreated without realigning when the BAM itself is
+  still current.
+- FusionSeeker publishes its output only after a successful run and a non-empty
+  result file, then writes a completion marker.
+- JAFFAL writes a completion marker only after `jaffa_results.csv` has been
+  verified.
 
-- Dorado 1.1.1 and hg38 reference FASTA
-- FusionSeeker and bsalign in `PATH`
-- JAFFA Apptainer image plus hg38/gencode49 reference (`prepare_jaffa_hg38_reference.sh`)
-- Modules: `palma/2022a GCC/11.3.0 SAMtools/1.16.1` (FusionSeeker job), `palma/2024a Apptainer` (JAFFAL job)
+After a timeout or failure, run `./submit_fusions.sh` again for the affected
+sample. Incomplete stages are resumed or rebuilt.
 
-## Outputs
+## 📊 Main outputs
 
-- `results_fusionseeker/<sample>/fusionseeker_out/confident_genefusion.txt`
-- `results_fusionseeker/<sample>/alignment/read_counts.tsv`
-- `results_jaffal/<sample>/jaffa_results.csv`
+| Caller | Result |
+| --- | --- |
+| FusionSeeker | `results_fusionseeker/<sample>/fusionseeker_out/confident_genefusion.txt` |
+| FusionSeeker QC | `results_fusionseeker/<sample>/alignment/read_counts.tsv` |
+| JAFFAL | `results_jaffal/<sample>/jaffa_results.csv` |
+
+## ⚠️ Notes
+
+- Run the scripts from a real path rather than a symlinked checkout; Apptainer
+  bind mounts can otherwise fail. The driver automatically switches to the
+  physical repository directory.
+- Do not launch the two per-sample job scripts manually unless you provide the
+  required absolute FASTQ and output paths. The driver handles this normally.
+- Cluster software and reference paths are site-specific and should be reviewed
+  before the first run.

@@ -25,15 +25,26 @@ trap 'status=$?; echo "[$(date)] ERROR at line ${LINENO}: ${BASH_COMMAND} (exit 
 
 (( $# == 3 )) || { echo "Usage: $0 <sample> <fastq_abs> <out_dir_abs>" >&2; exit 2; }
 SAMPLE="$1"
-FASTQ="$(readlink -f "$2")"
-OUT_DIR="$(readlink -f "$3")"
+[[ "$SAMPLE" =~ ^[[:alnum:]][[:alnum:]_.-]*$ ]] || { echo "ERROR: invalid sample name: $SAMPLE" >&2; exit 2; }
+FASTQ="$(readlink -f -- "$2")"
+mkdir -p -- "$3"
+OUT_DIR="$(readlink -f -- "$3")"
+[[ "$OUT_DIR" != "/" ]] || { echo "ERROR: refusing to use / as output directory" >&2; exit 2; }
 TMP_DIR="$OUT_DIR/tmp"
+DONE_MARKER="$OUT_DIR/.jaffal.complete"
+INPUT_STATE="$OUT_DIR/.jaffal-input-state"
 
 REF_DIR=/scratch/tmp/thomachr/software/JAFFA
 JAFFA_SIF="$REF_DIR/jaffa_latest.sif"
 ANNOTATION=gencode49          # files under REF_DIR are hg38_gencode49.* (lowercase)
 THREADS="${SLURM_CPUS_PER_TASK:-16}"
+[[ "$THREADS" =~ ^[0-9]+$ ]] && (( THREADS >= 1 )) || {
+    echo "ERROR: SLURM_CPUS_PER_TASK must be a positive integer (got: $THREADS)" >&2
+    exit 1
+}
 
+command -v module >/dev/null || { echo "ERROR: environment modules are not available" >&2; exit 1; }
+module purge
 module load palma/2024a Apptainer
 
 command -v apptainer >/dev/null || { echo "ERROR: apptainer not found" >&2; exit 1; }
@@ -42,12 +53,19 @@ command -v apptainer >/dev/null || { echo "ERROR: apptainer not found" >&2; exit
 [[ -r "$FASTQ" ]]     || { echo "ERROR: fastq not readable: $FASTQ" >&2; exit 1; }
 mkdir -p "$OUT_DIR" "$TMP_DIR"
 
+FASTQ_STAT="$(stat -c '%s:%Y' "$FASTQ")"
+IMAGE_STAT="$(stat -c '%s:%Y' "$JAFFA_SIF")"
+INPUT_SIGNATURE="fastq=$FASTQ:$FASTQ_STAT|image=$JAFFA_SIF:$IMAGE_STAT|genome=hg38|annotation=$ANNOTATION"
+
 # Scratch files (host side and inside the container) go to the sample's own tmp/.
 export TMPDIR="$TMP_DIR"
 export APPTAINER_TMPDIR="$TMP_DIR"
 export APPTAINERENV_TMPDIR=/tmp
 
-if [[ -s "$OUT_DIR/jaffa_results.csv" ]]; then
+if [[ -s "$OUT_DIR/jaffa_results.csv" \
+        && -f "$DONE_MARKER" \
+        && -r "$INPUT_STATE" \
+        && "$(<"$INPUT_STATE")" == "$INPUT_SIGNATURE" ]]; then
     echo "[$(date)] $SAMPLE: jaffa_results.csv already exists in $OUT_DIR; nothing to do."
     exit 0
 fi
@@ -65,9 +83,9 @@ apptainer --version
 # symlink-resolved (avoids the bind-mount-on-symlink pitfall).
 cd "$OUT_DIR"
 apptainer run \
-    -B "$REF_DIR:/ref" \
+    -B "$REF_DIR:/ref:ro" \
     -B "$TMP_DIR:/tmp" \
-    -B "$FASTQ" \
+    -B "$FASTQ:$FASTQ:ro" \
     "$JAFFA_SIF" \
     -p readLayout=single \
     -p genome=hg38 -p annotation="$ANNOTATION" \
@@ -76,5 +94,8 @@ apptainer run \
     "$FASTQ"
 
 [[ -s "$OUT_DIR/jaffa_results.csv" ]] || { echo "ERROR: JAFFAL finished but jaffa_results.csv is missing/empty" >&2; exit 1; }
-rm -rf "$TMP_DIR"
+printf '%s\n' "$INPUT_SIGNATURE" > "${INPUT_STATE}.tmp"
+mv -- "${INPUT_STATE}.tmp" "$INPUT_STATE"
+touch "$DONE_MARKER"
+rm -rf -- "$TMP_DIR"
 echo "[$(date)] $SAMPLE: JAFFAL finished -> $OUT_DIR/jaffa_results.csv"

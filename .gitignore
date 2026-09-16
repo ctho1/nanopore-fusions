@@ -1,0 +1,14 @@
+fastq/*
+!fastq/.gitkeep
+
+fastq_concat/*
+!fastq_concat/.gitkeep
+
+log/*
+!log/.gitkeep
+
+results_jaffal/*
+!results_jaffal/.gitkeep
+
+results_fusionseeker/*
+!results_fusionseeker/.gitkeep

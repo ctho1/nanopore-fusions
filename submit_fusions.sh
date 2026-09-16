@@ -13,11 +13,14 @@
 #   ./results_fusionseeker/<sample>/       FusionSeeker only: alignment/, tmp/, fusionseeker_out/
 #   ./log/<sample>.jaffal.<jobid>.{out,err}.txt, ./log/<sample>.fusionseeker.<jobid>.{out,err}.txt
 #
-# NOTE: run from a directory that is NOT under a symlink (apptainer bind mounts
-# silently fail on symlinked paths). If unsure: cd $(readlink -f .)
+# The driver switches to the physical repository directory before creating paths,
+# which avoids Apptainer bind-mount problems caused by symlinked working paths.
 
 set -Eeuo pipefail
 shopt -s nullglob
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+cd "$SCRIPT_DIR"
 
 FASTQ_ROOT=./fastq
 CONCAT_DIR=./fastq_concat
@@ -29,13 +32,20 @@ JAFFAL_JOB=./run_jaffal_sample.sh
 FS_JOB=./run_fusionseeker_sample.sh
 DRY_RUN="${DRY_RUN:-0}"
 
-if [[ "$(pwd)" != "$(readlink -f "$(pwd)")" ]]; then
-    echo "ERROR: current directory is under a symlink; cd \$(readlink -f .) first." >&2
-    exit 1
-fi
+[[ "$DRY_RUN" == "0" || "$DRY_RUN" == "1" ]] || { echo "ERROR: DRY_RUN must be 0 or 1" >&2; exit 2; }
 [[ -f "$JAFFAL_JOB" ]] || { echo "ERROR: $JAFFAL_JOB not found" >&2; exit 1; }
 [[ -f "$FS_JOB" ]]     || { echo "ERROR: $FS_JOB not found" >&2; exit 1; }
-command -v sbatch >/dev/null || { echo "ERROR: sbatch not found" >&2; exit 1; }
+if [[ "$DRY_RUN" == "0" ]]; then
+    command -v sbatch >/dev/null || { echo "ERROR: sbatch not found" >&2; exit 1; }
+fi
+if stat -c '%s' "$JAFFAL_JOB" >/dev/null 2>&1; then
+    STAT_FLAVOR=gnu
+elif stat -f '%z' "$JAFFAL_JOB" >/dev/null 2>&1; then
+    STAT_FLAVOR=bsd
+else
+    echo "ERROR: the installed stat command cannot report file size and modification time" >&2
+    exit 1
+fi
 
 mkdir -p "$CONCAT_DIR" "$JAFFAL_RESULT_DIR" "$FS_RESULT_DIR" "$LOG_DIR"
 
@@ -47,6 +57,21 @@ else
     for d in "$FASTQ_ROOT"/*/; do samples+=("$(basename "$d")"); done
 fi
 (( ${#samples[@]} > 0 )) || { echo "ERROR: no sample subdirectories under $FASTQ_ROOT" >&2; exit 1; }
+
+for sample in "${samples[@]}"; do
+    [[ "$sample" =~ ^[[:alnum:]][[:alnum:]_.-]*$ ]] || {
+        echo "ERROR: invalid sample name '$sample' (allowed: letters, numbers, dot, underscore, hyphen)" >&2
+        exit 2
+    }
+done
+
+concat_tmp=""
+manifest_tmp=""
+cleanup() {
+    [[ -z "$concat_tmp" ]] || rm -f -- "$concat_tmp"
+    [[ -z "$manifest_tmp" ]] || rm -f -- "$manifest_tmp"
+}
+trap cleanup EXIT
 
 submit() {
     # submit <sample> <tool> <job script> <fastq_abs> <out_dir>
@@ -81,13 +106,37 @@ for sample in "${samples[@]}"; do
         echo "  single chunk, using directly: $fastq_abs"
     else
         concat="$CONCAT_DIR/${sample}.fastq.gz"
-        if [[ -s "$concat" ]]; then
-            echo "  concatenated fastq exists, reusing: $concat"
+        manifest="$CONCAT_DIR/${sample}.chunks.tsv"
+        concat_tmp="${concat}.tmp"
+        manifest_tmp="${manifest}.tmp"
+
+        : > "$manifest_tmp"
+        for chunk in "${chunks[@]}"; do
+            if [[ "$STAT_FLAVOR" == "gnu" ]]; then
+                chunk_size="$(stat -c '%s' "$chunk")"
+                chunk_mtime="$(stat -c '%Y' "$chunk")"
+            else
+                chunk_size="$(stat -f '%z' "$chunk")"
+                chunk_mtime="$(stat -f '%m' "$chunk")"
+            fi
+            printf '%s\t%s\t%s\n' \
+                "$(readlink -f "$chunk")" \
+                "$chunk_size" \
+                "$chunk_mtime" >> "$manifest_tmp"
+        done
+
+        if [[ -s "$concat" && -f "$manifest" ]] && cmp -s "$manifest_tmp" "$manifest"; then
+            echo "  concatenated fastq is up to date, reusing: $concat"
+            rm -f -- "$manifest_tmp"
+            manifest_tmp=""
         else
             echo "  concatenating -> $concat"
-            cat "${chunks[@]}" > "${concat}.tmp"
-            gzip -t "${concat}.tmp"
-            mv "${concat}.tmp" "$concat"
+            cat "${chunks[@]}" > "$concat_tmp"
+            gzip -t "$concat_tmp"
+            mv -- "$concat_tmp" "$concat"
+            concat_tmp=""
+            mv -- "$manifest_tmp" "$manifest"
+            manifest_tmp=""
         fi
         fastq_abs="$(readlink -f "$concat")"
     fi
